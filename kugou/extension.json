@@ -1,7 +1,7 @@
 {
   "id": "nekotune.kugou",
   "name": "酷狗音乐 / Kugou Music",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "apiVersion": 2,
   "description": "酷狗账号、搜索、在线播放、下载、封面和 KRC/LRC 歌词。需自行配置兼容的 Worker。",
   "contributes": {
