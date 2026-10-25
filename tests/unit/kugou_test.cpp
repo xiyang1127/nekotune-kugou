@@ -15,7 +15,7 @@ const QString hash = "0123456789abcdef0123456789abcdef";
 void configure(FakeContext &context) {
     context.extensionId = "nekotune.kugou";
     context.configuration = {{"enabled", true}, {"worker_url", "https://worker.example"}, {"legacy_imported", true}};
-    context.secrets.insert("account-key", "fixture-key");
+    context.storedSecrets.insert("account-key", "fixture-key");
 }
 QJsonObject encodedKrc(const QByteArray &text = "[0,2000]<0,1000,0>Hello<1000,1000,0>world") {
     uLongf size = compressBound(uLong(text.size()));
@@ -91,7 +91,7 @@ void KugouTest::accountStateIsPersistedBeforeSuccess() {
         keyHeader = keyHeader || (name == "X-Account-Key" && value == "fixture-key");
     QVERIFY(keyHeader);
     QVERIFY(client.loggedIn());
-    QVERIFY(context.secrets.value("account-session").contains("private-token"));
+    QVERIFY(context.storedSecrets.value("account-session").contains("private-token"));
     const auto status = QJsonDocument(QJsonObject::fromVariantMap(client.status())).toJson();
     QVERIFY(!status.contains("private-token") && !status.contains("fixture-key"));
     const auto previous = client.cookies();
@@ -185,8 +185,8 @@ void KugouTest::extensionRegistersSourcesAndDownloads() {
     FakeTransport transport;
     Extension extension(context, transport);
     QVERIFY(run<void>([&](auto done) { extension.activate(done); }));
-    QVERIFY(context.music.contains("music"));
-    QVERIFY(context.lyrics.contains("lyrics"));
+    QVERIFY(context.musicProviders.contains("music"));
+    QVERIFY(context.lyricsProviders.contains("lyrics"));
     QVERIFY(context.call("status").value().value("key_saved").toBool());
     QVERIFY(!context.call("config.set", {{"enabled", true}, {"worker_url", "http://evil.example"}}));
     QCOMPARE(context.configuration.value("worker_url").toString(), "https://worker.example");
@@ -195,25 +195,25 @@ void KugouTest::extensionRegistersSourcesAndDownloads() {
     QCOMPARE(download.value().value("params").toMap().value("source").toString(), "nekotune.kugou/music");
     context.deliver("music.download", {{"task", "fixture-task"}, {"state", "finished"}, {"song_id", 7}});
     bool finished = false;
-    for (const auto &event : context.events)
+    for (const auto &event : context.publishedEvents)
         finished = finished || (event.name == "download_finished" && event.data.value("song_id").toInt() == 7);
     QVERIFY(finished);
     QVERIFY(context.call("config.set", {{"enabled", false}, {"worker_url", "https://worker.example"}}));
-    QVERIFY(context.music.isEmpty() && context.lyrics.isEmpty());
+    QVERIFY(context.musicProviders.isEmpty() && context.lyricsProviders.isEmpty());
     // The manager writes config directly instead of invoking the plugin's config.set service.
     auto config = context.configuration;
     config.insert("enabled", true);
-    context.updateConfig(config, [](Result<void>) {});
-    QVERIFY(context.music.contains("music") && context.lyrics.contains("lyrics"));
+    context.config().update(config, [](Result<void>) {});
+    QVERIFY(context.musicProviders.contains("music") && context.lyricsProviders.contains("lyrics"));
     config.insert("worker_url", "http://evil.example");
-    context.updateConfig(config, [](Result<void>) {});
-    QVERIFY(context.music.isEmpty() && context.lyrics.isEmpty());
+    context.config().update(config, [](Result<void>) {});
+    QVERIFY(context.musicProviders.isEmpty() && context.lyricsProviders.isEmpty());
     QVERIFY(context.published("operation_failed"));
     config.insert("worker_url", "https://worker.example");
-    context.updateConfig(config, [](Result<void>) {});
-    QVERIFY(context.music.contains("music") && context.lyrics.contains("lyrics"));
+    context.config().update(config, [](Result<void>) {});
+    QVERIFY(context.musicProviders.contains("music") && context.lyricsProviders.contains("lyrics"));
     extension.close();
-    QVERIFY(context.music.isEmpty() && context.services.isEmpty());
+    QVERIFY(context.musicProviders.isEmpty() && context.serviceHandlers.isEmpty());
 }
 
 QTEST_GUILESS_MAIN(KugouTest)

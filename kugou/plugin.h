@@ -12,7 +12,7 @@ class Lyrics;
 /// Plugin logic, separate from the Qt plugin shell so tests can drive it with a fake context.
 class Extension {
   public:
-    Extension(nekotune::sdk::IExtensionContext &context, nekotune::ext::HttpTransport &transport);
+    Extension(nekotune::sdk::ExtensionContext &context, nekotune::ext::HttpTransport &transport);
     ~Extension();
     void activate(std::function<void(Result<void>)> done);
     void close();
@@ -31,7 +31,7 @@ class Extension {
     void registerServices();
     void service(const QString &id, nekotune::sdk::Handler handler);
 
-    nekotune::sdk::IExtensionContext &m_context;
+    nekotune::sdk::ExtensionContext &m_context;
     Client m_client;
     std::unique_ptr<Music> m_music;
     std::unique_ptr<Lyrics> m_lyrics;

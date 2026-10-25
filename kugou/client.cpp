@@ -178,10 +178,10 @@ Result<QString> externalKey() {
     return validateKey(QString::fromUtf8(file.readAll()));
 }
 
-Client::Client(sdk::IExtensionContext &context, ext::HttpTransport &transport) : m_context(context), m_transport(transport) {}
+Client::Client(sdk::ExtensionContext &context, ext::HttpTransport &transport) : m_context(context), m_transport(transport) {}
 
 void Client::initialize(std::function<void()> done) {
-    m_context.secretGet("account-key", [this, done](Result<QString> saved) {
+    m_context.secrets().get("account-key", [this, done](Result<QString> saved) {
         if (!saved)
             m_credentialError = "System keyring unavailable or legacy credential migration failed";
         else {
@@ -193,7 +193,7 @@ void Client::initialize(std::function<void()> done) {
             else
                 m_credentialError = "System keyring unavailable or legacy credential migration failed";
         }
-        m_context.secretGet("account-session", [this, done](Result<QString> session) {
+        m_context.secrets().get("account-session", [this, done](Result<QString> session) {
             if (!session)
                 m_credentialError = "System keyring unavailable or legacy session migration failed";
             else if (!session.value().isEmpty()) {
@@ -211,7 +211,7 @@ void Client::initialize(std::function<void()> done) {
     });
 }
 bool Client::configured() const {
-    const auto config = m_context.config();
+    const auto config = m_context.config().get();
     return config.value("enabled").toBool() && !config.value("worker_url").toString().isEmpty();
 }
 bool Client::loggedIn() const {
@@ -220,7 +220,7 @@ bool Client::loggedIn() const {
            !dfid.isEmpty() && dfid != "0" && dfid != "-" && dfid != "undefined";
 }
 QVariantMap Client::status() const {
-    const auto config = m_context.config();
+    const auto config = m_context.config().get();
     return {{"enabled", config.value("enabled").toBool()},
             {"worker_url", config.value("worker_url").toString()},
             {"configured", configured() && !m_key.isEmpty()},
@@ -232,10 +232,10 @@ void Client::saveKey(const QString &value, Done done) {
     const auto next = validateKey(value);
     if (!next)
         return done(next.error());
-    m_context.secretSet("account-key", next.value(), [this, next = next.value(), done](Result<void> saved) {
+    m_context.secrets().set("account-key", next.value(), [this, next = next.value(), done](Result<void> saved) {
         if (!saved)
             return done(saved);
-        m_context.secretGet("account-key", [this, next, done](Result<QString> read) {
+        m_context.secrets().get("account-key", [this, next, done](Result<QString> read) {
             if (!read)
                 return done(read.error());
             if (read.value() != next)
@@ -248,7 +248,7 @@ void Client::saveKey(const QString &value, Done done) {
     });
 }
 void Client::clearKey(Done done) {
-    m_context.secretDelete("account-key", [this, done](Result<void> removed) {
+    m_context.secrets().remove("account-key", [this, done](Result<void> removed) {
         if (!removed)
             return done(removed);
         const auto external = externalKey();
@@ -288,7 +288,7 @@ void Client::json(const QString &route, const Query &query, std::function<void(R
         return done(failure("Enable Kugou and configure its Worker in plugin settings"));
     QString base = route;
     if (!route.startsWith("https:")) {
-        const auto origin = workerOrigin(m_context.config().value("worker_url").toString());
+        const auto origin = workerOrigin(m_context.config().get().value("worker_url").toString());
         if (!origin)
             return done(origin.error());
         base = origin.value() + prefix + route;
@@ -329,10 +329,10 @@ void Client::account(const QString &route, QJsonObject body, std::function<void(
             QJsonDocument(QJsonObject{{"version", 1}, {"cookies", QJsonObject::fromVariantMap(cookies)}}).toJson(QJsonDocument::Compact));
         if (serialized.toUtf8().size() > 16384)
             return done(failure("Kugou session exceeds storage limit"));
-        m_context.secretSet("account-session", serialized, [this, cookies, value, done](Result<void> saved) {
+        m_context.secrets().set("account-session", serialized, [this, cookies, value, done](Result<void> saved) {
             if (!saved)
                 return done(saved.error());
-            m_context.secretGet("account-session", [this, cookies, value, done](Result<QString> read) {
+            m_context.secrets().get("account-session", [this, cookies, value, done](Result<QString> read) {
                 const auto stored = read ? QJsonDocument::fromJson(read.value().toUtf8()).object().value("cookies").toObject().toVariantMap()
                                          : QVariantMap{};
                 if (!read || stored != cookies)

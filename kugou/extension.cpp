@@ -1,4 +1,5 @@
 #include "plugin.h"
+#include "common/lyrics.h"
 #include <QDir>
 #include <QFile>
 #include <QJsonDocument>
@@ -34,7 +35,7 @@ class Music final : public sdk::IMusicProvider {
         done(sdk::Track{t.value("id").toString(), t.value("title").toString(), t.value("artist").toString(),
                         t.value("album").toString(), t.value("cover_url").toString(), t.value("duration_ms").toLongLong()});
     }
-    void resolve(const QString &id, const QString &, std::function<void(Result<sdk::ResolvedAudio>)> done) override {
+    void resolve(const QString &id, sdk::ResolvePurpose, std::function<void(Result<sdk::ResolvedAudio>)> done) override {
         const auto found = m_extension.track(id);
         if (!found)
             return done(found.error());
@@ -69,8 +70,8 @@ class Music final : public sdk::IMusicProvider {
 class Lyrics final : public sdk::ILyricsProvider {
   public:
     explicit Lyrics(Extension &extension) : m_extension(extension) {}
-    void search(const sdk::Params &query, sdk::Reply done) override {
-        m_extension.m_client.search(query.value("title").toString(), 1, [this, done](Result<QVariantMap> result) {
+    void search(const sdk::LyricsQuery &query, std::function<void(Result<QVector<sdk::LyricsCandidate>>)> done) override {
+        m_extension.m_client.search(query.title, 1, [this, done](Result<QVariantMap> result) {
             if (!result)
                 return done(result.error());
             m_extension.remember(result.value());
@@ -81,19 +82,22 @@ class Lyrics final : public sdk::ILyricsProvider {
                 item.insert("score", 0);
                 candidates.append(item);
             }
-            done(sdk::Params{{"candidates", candidates}});
+            done(ext::lyricsCandidatesFromList(candidates));
         });
     }
-    void resolve(const sdk::Params &candidate, sdk::Reply done) override {
-        if (candidate.value("song_result").toBool()) {
+    void resolve(const sdk::LyricsCandidate &selected, std::function<void(Result<sdk::LyricsResolution>)> done) override {
+        const auto candidate = ext::lyricsCandidateToMap(selected);
+        if (selected.songResult) {
             lyricCandidates(m_extension.m_client, candidate, [done](Result<QVariantList> candidates) {
-                done(candidates ? Result<sdk::Params>(sdk::Params{{"candidates", candidates.value()}})
-                                : Result<sdk::Params>(candidates.error()));
+                done(candidates ? Result<sdk::LyricsResolution>(sdk::LyricsResolution{
+                                      std::nullopt, ext::lyricsCandidatesFromList(candidates.value())})
+                                : Result<sdk::LyricsResolution>(candidates.error()));
             });
             return;
         }
         lyricDocument(m_extension.m_client, candidate, false, [done](Result<Document> document) {
-            done(document ? Result<sdk::Params>(document.value().value) : Result<sdk::Params>(document.error()));
+            done(document ? Result<sdk::LyricsResolution>(ext::lyricsResolutionFromMap(document.value().value))
+                          : Result<sdk::LyricsResolution>(document.error()));
         });
     }
 
@@ -101,7 +105,7 @@ class Lyrics final : public sdk::ILyricsProvider {
     Extension &m_extension;
 };
 
-Extension::Extension(sdk::IExtensionContext &context, ext::HttpTransport &transport)
+Extension::Extension(sdk::ExtensionContext &context, ext::HttpTransport &transport)
     : m_context(context), m_client(context, transport), m_music(std::make_unique<Music>(*this)),
       m_lyrics(std::make_unique<Lyrics>(*this)) {}
 Extension::~Extension() { close(); }
@@ -122,7 +126,7 @@ QVariantMap Extension::status() const {
 }
 void Extension::emitEvent(const QString &name, const QVariantMap &data) {
     if (!m_closed)
-        m_context.publish(name, data);
+        m_context.events().publish(name, data);
 }
 void Extension::notify() { emitEvent("status", status()); }
 void Extension::remember(const QVariantMap &result) {
@@ -138,7 +142,7 @@ void Extension::remember(const QVariantMap &result) {
     QVariantMap stored;
     for (const auto &id : std::as_const(m_trackOrder))
         stored.insert(id, m_tracks.value(id));
-    m_context.storageSet("tracks", stored, [](Result<void>) {});
+    m_context.storage().set("tracks", stored, [](Result<void>) {});
 }
 Result<QVariantMap> Extension::track(const QString &id) const {
     if (!validHash(id))
@@ -148,7 +152,7 @@ Result<QVariantMap> Extension::track(const QString &id) const {
 Result<void> Extension::configureSources() {
     if (m_closed)
         return {};
-    const auto config = m_context.config();
+    const auto config = m_context.config().get();
     const auto signature = QJsonDocument::fromVariant(QVariantList{config.value("enabled"), config.value("worker_url")})
                                .toJson(QJsonDocument::Compact);
     if (m_sourcesKnown && signature == m_sourceSignature)
@@ -162,9 +166,9 @@ Result<void> Extension::configureSources() {
     }
     if (auto origin = workerOrigin(config.value("worker_url").toString()); !origin)
         return origin.error();
-    m_sources.push_back(m_context.registerMusicProvider("music", m_music.get(),
-                                                        {{"name", "酷狗 / Kugou"}, {"download", true}, {"page", "music"}}));
-    m_sources.push_back(m_context.registerLyricsProvider("lyrics", m_lyrics.get(), {{"name", "酷狗 / Kugou"}}));
+    m_sources.push_back(m_context.music().add("music", m_music.get(),
+                                              {.name = "酷狗 / Kugou", .download = true, .page = "music"}));
+    m_sources.push_back(m_context.lyrics().add("lyrics", m_lyrics.get(), {.name = "酷狗 / Kugou"}));
     m_sourceSignature = signature;
     m_sourcesKnown = true;
     return {};
@@ -185,13 +189,13 @@ void Extension::operation(const QString &name, std::function<void(Reply)> action
     });
 }
 void Extension::service(const QString &id, sdk::Handler handler) {
-    m_registrations.push_back(m_context.registerService(id, std::move(handler)));
+    m_registrations.push_back(m_context.services().add(id, std::move(handler)));
 }
 
 void Extension::activate(std::function<void(Result<void>)> done) {
     auto start = [this, done] {
         m_client.initialize([this, done] {
-            m_context.storageGet("tracks", [this, done](Result<QVariant> stored) {
+            m_context.storage().get("tracks", [this, done](Result<QVariant> stored) {
                 if (stored) {
                     const auto map = stored.value().toMap();
                     for (auto it = map.cbegin(); it != map.cend(); ++it) {
@@ -200,13 +204,13 @@ void Extension::activate(std::function<void(Result<void>)> done) {
                     }
                 }
                 registerServices();
-                m_registrations.push_back(m_context.on("extension.config_changed", [this](const sdk::Params &) {
+                m_registrations.push_back(m_context.events().on("extension.config_changed", [this](const sdk::Params &) {
                     if (auto configured = configureSources(); !configured)
                         emitEvent("operation_failed", {{"message", configured.error().message}});
                     emitEvent("config_changed");
                     notify();
                 }));
-                m_registrations.push_back(m_context.on("music.download", [this](const sdk::Params &event) {
+                m_registrations.push_back(m_context.events().on("music.download", [this](const sdk::Params &event) {
                     if (event.value("task").toString() != m_activeTask || m_activeTask.isEmpty())
                         return;
                     const auto state = event.value("state").toString();
@@ -221,9 +225,9 @@ void Extension::activate(std::function<void(Result<void>)> done) {
             });
         });
     };
-    if (m_context.config().value("legacy_imported").toBool())
+    if (m_context.config().get().value("legacy_imported").toBool())
         return start();
-    m_context.hostCall("player.status", {}, [this, start, done](Result<sdk::Params> host) {
+    m_context.host().call("player.status", {}, [this, start, done](Result<sdk::Params> host) {
         if (!host)
             return done(host.error());
         QVariantMap legacy;
@@ -231,15 +235,15 @@ void Extension::activate(std::function<void(Result<void>)> done) {
         if (file.open(QIODevice::ReadOnly))
             legacy = QJsonDocument::fromJson(file.readAll()).object().value("kugou").toObject().toVariantMap();
         else if (file.exists())
-            m_context.log(QtWarningMsg, "Legacy configuration unavailable; configure Kugou in plugin settings");
+            m_context.log().write(QtWarningMsg, "Legacy configuration unavailable; configure Kugou in plugin settings");
         const auto origin = workerOrigin(legacy.value("worker_url").toString(), false);
         const auto url = origin ? origin.value() : QString();
         QVariantMap config{{"enabled", legacy.value("enabled").toBool() && !url.isEmpty()}, {"worker_url", url}};
-        const auto current = m_context.config();
+        const auto current = m_context.config().get();
         for (auto it = current.cbegin(); it != current.cend(); ++it)
             config.insert(it.key(), it.value());
         config.insert("legacy_imported", true);
-        m_context.updateConfig(config, [start, done](Result<void> saved) {
+        m_context.config().update(config, [start, done](Result<void> saved) {
             if (!saved)
                 return done(saved);
             start();
@@ -258,10 +262,10 @@ void Extension::registerServices() {
         const auto origin = workerOrigin(worker.toString(), enabled.toBool());
         if (!origin)
             return reply(origin.error());
-        auto config = m_context.config();
+        auto config = m_context.config().get();
         config.insert("enabled", enabled.toBool());
         config.insert("worker_url", origin.value());
-        m_context.updateConfig(config, [this, reply](Result<void> saved) {
+        m_context.config().update(config, [this, reply](Result<void> saved) {
             if (!saved)
                 return reply(saved.error());
             if (auto configured = configureSources(); !configured)
@@ -361,7 +365,7 @@ void Extension::registerServices() {
         const auto item = track(params.value("hash").toString());
         if (!item)
             return reply(item.error());
-        m_context.hostCall("music.download", {{"source", m_context.id() + "/music"}, {"track", item.value()}},
+        m_context.host().call("music.download", {{"source", m_context.info().id + "/music"}, {"track", item.value()}},
                            [this, reply](Result<sdk::Params> result) {
                                if (!result)
                                    return reply(result);
@@ -373,13 +377,13 @@ void Extension::registerServices() {
     service("cancel", [this](const sdk::Params &, sdk::Reply reply) {
         if (m_activeTask.isEmpty())
             return reply(failure("No active Kugou download"));
-        m_context.hostCall("music.cancel", {{"task", m_activeTask}}, reply);
+        m_context.host().call("music.cancel", {{"task", m_activeTask}}, reply);
     });
     service("play", [this](const sdk::Params &params, sdk::Reply reply) {
         const auto item = track(params.value("hash").toString());
         if (!item)
             return reply(item.error());
-        m_context.hostCall("music.enqueue", {{"source", m_context.id() + "/music"}, {"track", item.value()}, {"play", true}}, reply);
+        m_context.host().call("music.enqueue", {{"source", m_context.info().id + "/music"}, {"track", item.value()}, {"play", true}}, reply);
     });
 }
 } // namespace kugou

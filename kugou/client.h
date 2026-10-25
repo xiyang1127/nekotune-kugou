@@ -31,7 +31,7 @@ Result<QString> externalKey();
 class Client {
   public:
     using Query = QList<QPair<QString, QString>>;
-    Client(nekotune::sdk::IExtensionContext &context, nekotune::ext::HttpTransport &transport);
+    Client(nekotune::sdk::ExtensionContext &context, nekotune::ext::HttpTransport &transport);
     void initialize(std::function<void()> done);
     bool configured() const;
     bool loggedIn() const;
@@ -53,7 +53,7 @@ class Client {
     QString key() const { return m_key; }
 
   private:
-    nekotune::sdk::IExtensionContext &m_context;
+    nekotune::sdk::ExtensionContext &m_context;
     nekotune::ext::HttpTransport &m_transport;
     QString m_key, m_credentialError;
     bool m_keySaved = false;
